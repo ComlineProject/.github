@@ -14,7 +14,8 @@ name: Fuzz
 #   `reports` branch (other runs do a dry run of that).
 #
 # The image (`image`) has the nightly toolchain, cargo-fuzz, bash, git, gh and
-# python3 already: nothing is installed here.
+# python3 already: nothing is installed here. Steps in a container default to
+# `sh -e`, so the container job sets `defaults: run: shell: bash`.
 #
 # Permissions the caller must grant its job: `contents: read` and
 # `issues: write` (the fuzz jobs open the issue), and `contents: write` when

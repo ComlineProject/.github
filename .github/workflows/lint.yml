@@ -1,9 +1,34 @@
 name: Lint
 
+# Lints the workflows of the repository it runs in (actionlint), and, when
+# there is one, a Renovate config. Runs on this repository's own pushes and
+# pull requests, and is a reusable workflow for other repositories:
+#
+#   jobs:
+#     lint:
+#       uses: ComlineProject/.github/.github/workflows/lint.yml@<sha> # <tag>
+#       with:
+#         renovate-config: renovate.json   # optional
+#
+# On this repository's own triggers `inputs` is empty, so a default can't be
+# relied on there: the Renovate job falls back to renovate-config.json when
+# this repository is the one running.
+#
+# Needs no more than `contents: read`. The concurrency group below is this
+# workflow's own; it can't clash with a caller's differently named group.
+
 on:
   push:
     branches: [main]
   pull_request:
+  workflow_call:
+    inputs:
+      renovate-config:
+        description: >-
+          A Renovate config to validate with `--strict`, relative to the
+          repository root; empty to skip the check.
+        type: string
+        default: ''
 
 permissions:
   contents: read
@@ -28,6 +53,7 @@ jobs:
 
   renovate-config:
     name: renovate-config.json
+    if: inputs.renovate-config != '' || github.repository == 'ComlineProject/.github'
     runs-on: ubuntu-24.04
     timeout-minutes: 10
     steps:
@@ -38,4 +64,6 @@ jobs:
         with:
           node-version: 24
       - name: Validate
-        run: npx --yes --package renovate@44.192.2 -- renovate-config-validator --strict renovate-config.json
+        env:
+          CONFIG: ${{ inputs.renovate-config || 'renovate-config.json' }}
+        run: npx --yes --package renovate@44.192.2 -- renovate-config-validator --strict "$CONFIG"

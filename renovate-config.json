@@ -1,0 +1,100 @@
+{
+  "$schema": "https://docs.renovatebot.com/renovate-schema.json",
+  "description": [
+    "Shared Renovate preset for ComlineProject repositories. Extend it with github>ComlineProject/.github:renovate-config"
+  ],
+  "extends": [
+    "config:recommended",
+    "helpers:pinGitHubActionDigests",
+    "docker:pinDigests"
+  ],
+  "schedule": [
+    "before 6am on monday"
+  ],
+  "timezone": "UTC",
+  "prConcurrentLimit": 5,
+  "labels": [
+    "chore"
+  ],
+  "vulnerabilityAlerts": {
+    "enabled": true,
+    "labels": [
+      "security"
+    ]
+  },
+  "customManagers": [
+    {
+      "description": [
+        "The CI image passed to the shared workflows as an `image:` input (the github-actions manager only reads `container:` and `services:`)"
+      ],
+      "customType": "regex",
+      "managerFilePatterns": [
+        "/^\\.github/workflows/[^/]+\\.ya?ml$/"
+      ],
+      "matchStrings": [
+        "image:\\s*[\"']?(?<depName>ghcr\\.io/comlineproject/ci-rust):(?<currentValue>[^@\\s\"']+)@(?<currentDigest>sha256:[a-f0-9]{64})"
+      ],
+      "datasourceTemplate": "docker"
+    }
+  ],
+  "packageRules": [
+    {
+      "description": [
+        "All GitHub Actions updates in one pull request"
+      ],
+      "matchManagers": [
+        "github-actions"
+      ],
+      "groupName": "GitHub Actions"
+    },
+    {
+      "description": [
+        "CI image digest bumps in one pull request, reviewed by hand"
+      ],
+      "matchPackageNames": [
+        "ghcr.io/comlineproject/ci-rust"
+      ],
+      "matchUpdateTypes": [
+        "digest"
+      ],
+      "groupName": "CI image",
+      "automerge": false
+    },
+    {
+      "description": [
+        "Cross-repo `rev =` pins on git dependencies are bumped by hand"
+      ],
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchDatasources": [
+        "git-refs",
+        "git-tags"
+      ],
+      "enabled": false
+    },
+    {
+      "description": [
+        "crates.io dependencies: one weekly pull request, Cargo.lock only"
+      ],
+      "matchManagers": [
+        "cargo"
+      ],
+      "matchDatasources": [
+        "crate"
+      ],
+      "groupName": "Cargo dependencies",
+      "rangeStrategy": "update-lockfile"
+    },
+    {
+      "description": [
+        "npm dependencies: one weekly pull request, the lockfile only"
+      ],
+      "matchManagers": [
+        "npm"
+      ],
+      "groupName": "npm dependencies",
+      "rangeStrategy": "update-lockfile"
+    }
+  ]
+}

@@ -1,0 +1,326 @@
+name: Bench
+
+# Reusable workflow: the instruction-count gate (iai-callgrind). On a pull
+# request, the base and then the head are benched in the same job on the same
+# machine, and the comparison is gated by the repository's own report script
+# (`report-script`), its ledger of accepted regressions (`ledger`) and a limit
+# in percent. Instruction counts are deterministic, so a fine limit holds
+# without flaking. On a push to the default branch, the optional `publish` job
+# benches the head alone and commits the report to the `reports` branch.
+#
+# The repository supplies, as before:
+# - `report-script`: `--targets` prints one `<package> <bench>` per line; the
+#   other flags are the ones the gate has always passed it (see README.md);
+# - the ledger and the bench targets themselves.
+#
+# The job runs in the CI image (`image`), which has the toolchain, valgrind and
+# iai-callgrind-runner, bash, git and python3 already: nothing is installed
+# here.
+#
+# Fork-safe by construction: the caller must run it from a plain
+# `pull_request` trigger (never `pull_request_target`), where a fork's run gets
+# a read-only token and no secrets; the gate job asks for `contents: read` and
+# nothing else. Only the `publish` job writes, and only off a pull request.
+#
+# Concurrency belongs to the caller: set `concurrency:` on the caller's
+# workflow, e.g. group `bench-${{ github.event.pull_request.number ||
+# github.ref }}` with `cancel-in-progress: true`. This workflow sets none.
+#
+# The caller's job needs `permissions: contents: write` only when it turns
+# `publish` on (a called workflow can't have more than its caller grants);
+# the gate job still asks for `contents: read`.
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: The CI container image, with its digest (ghcr.io/comlineproject/ci-rust:<tag>@sha256:...).
+        type: string
+        required: true
+      bench-command:
+        description: >-
+          The cargo command for one bench target; it is run as
+          `<bench-command> -p <package> --bench <bench> -- <iai args>`.
+        type: string
+        default: cargo bench
+      working-directory:
+        description: Where the Cargo workspace is, relative to the repository root.
+        type: string
+        default: .
+      report-script:
+        description: The repository's report script, relative to the repository root.
+        type: string
+        default: .github/scripts/bench-report.py
+      ledger:
+        description: The ledger of accepted regressions, relative to the repository root.
+        type: string
+        required: true
+      report-path:
+        description: Where the script writes the report, relative to the repository root (e.g. reports/core.bench.json).
+        type: string
+        required: true
+      limit-percent:
+        description: A benchmark fails when its instruction count grows by more than this many percent, unless the ledger accepts it.
+        type: string
+        default: '1'
+      wall-time-command:
+        description: >-
+          A command that also benches wall time with Criterion, run once on
+          the head and not gated (e.g. `cargo bench -p x --bench y`). When
+          set, the script gets `--criterion` and `--run` as well. Empty for
+          none.
+        type: string
+        default: ''
+      publish:
+        description: Add the job that benches the head and publishes the report on a push (not on a pull request).
+        type: boolean
+        default: false
+      default-branch:
+        description: The branch the report is published from; a run from another branch does a dry run of the publish.
+        type: string
+        default: main
+      reports-readme:
+        description: The file published as the reports branch's README.md.
+        type: string
+        default: .github/reports-branch.md
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  pull-request:
+    name: instruction-count gate
+    if: github.event_name == 'pull_request'
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    container: ${{ inputs.image }}
+    permissions:
+      contents: read
+    env:
+      BENCH_COMMAND: ${{ inputs.bench-command }}
+      WORKDIR: ${{ inputs.working-directory }}
+      REPORT_SCRIPT: ${{ inputs.report-script }}
+      LEDGER: ${{ inputs.ledger }}
+      REPORT: ${{ inputs.report-path }}
+      BENCH_LIMIT_PERCENT: ${{ inputs.limit-percent }}
+      WALL_TIME_COMMAND: ${{ inputs.wall-time-command }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Settings
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          git config --global --add safe.directory "$RUNNER_TEMP/base"
+          # Base and head build into separate target directories (in a shared
+          # one, the head's older source mtimes can make Cargo reuse the
+          # base's build), on paths of the same length: a bench binary's path
+          # is in its arguments, and its length moves the heap, which moves
+          # some counts. They share iai-callgrind's output directory, where
+          # it keeps the base's counts for the head to compare with.
+          echo "IAI_CALLGRIND_HOME=$GITHUB_WORKSPACE/target-iai" >> "$GITHUB_ENV"
+      - name: Toolchain
+        id: toolchain
+        # The repository's toolchain file picks it; base and head build with
+        # the same one.
+        run: echo "version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+      - name: Bench the base
+        id: base
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          git worktree add "$RUNNER_TEMP/base" "$BASE_SHA"
+          cd "$RUNNER_TEMP/base/$WORKDIR"
+          read -r -a bench_cmd <<< "$BENCH_COMMAND"
+          # The base's own targets; a base from before this workflow has none.
+          if ! python3 "$RUNNER_TEMP/base/$REPORT_SCRIPT" --targets > "$RUNNER_TEMP/base-targets" 2>/dev/null; then
+            : > "$RUNNER_TEMP/base-targets"
+          fi
+          if [ ! -s "$RUNNER_TEMP/base-targets" ]; then
+            echo "The base ($BASE_SHA) has no instruction-count benches; recording head only."
+            echo "compare=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          mapfile -t targets < "$RUNNER_TEMP/base-targets"
+          for target in "${targets[@]}"; do
+            read -r package bench <<< "$target"
+            echo "::group::Base: $package --bench $bench"
+            CARGO_TARGET_DIR="$RUNNER_TEMP/base-target" "${bench_cmd[@]}" -p "$package" --bench "$bench" -- \
+              --save-baseline=base --save-summary=json
+            echo "::endgroup::"
+          done
+          # The base's own summaries, kept apart from the head's: they say
+          # which benchmarks the base had, so one the head drops or renames
+          # is noticed, and give a renamed one its old count.
+          mkdir -p "$RUNNER_TEMP/base-iai"
+          (cd "$IAI_CALLGRIND_HOME" && find . -name summary.json -exec cp --parents {} "$RUNNER_TEMP/base-iai" \;)
+          echo "compare=true" >> "$GITHUB_OUTPUT"
+      - name: Bench the head
+        env:
+          COMPARE: ${{ steps.base.outputs.compare }}
+        run: |
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/head-target"
+          read -r -a bench_cmd <<< "$BENCH_COMMAND"
+          find "$IAI_CALLGRIND_HOME" -name summary.json -delete 2>/dev/null || true
+          # No --callgrind-limits: the gate is the Report step's, which knows
+          # the ledger. So this step fails only when a benchmark can't run.
+          listed=$(python3 "$GITHUB_WORKSPACE/$REPORT_SCRIPT" --targets)
+          mapfile -t targets <<< "$listed"
+          for target in "${targets[@]}"; do
+            read -r package bench <<< "$target"
+            echo "::group::Head: $package --bench $bench"
+            # A target the base ran is compared with its baseline; one the
+            # base doesn't have is recorded only.
+            if [ "$COMPARE" = "true" ] && grep -qxF "$target" "$RUNNER_TEMP/base-targets"; then
+              "${bench_cmd[@]}" -p "$package" --bench "$bench" -- --baseline=base --save-summary=json
+            else
+              echo "The base doesn't have this target; recording head only."
+              "${bench_cmd[@]}" -p "$package" --bench "$bench" -- --save-summary=json
+            fi
+            echo "::endgroup::"
+          done
+      - name: Wall time (not gated)
+        if: inputs.wall-time-command != ''
+        run: |
+          export CARGO_TARGET_DIR="$RUNNER_TEMP/head-target"
+          eval "$WALL_TIME_COMMAND"
+      - name: Report and gate
+        env:
+          HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PR: ${{ github.event.pull_request.number }}
+          TOOLCHAIN: ${{ steps.toolchain.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          # The base's ledger tells this pull request's entries from history;
+          # a base without one has none. The script's exit status is the
+          # verdict, given after the summary is written.
+          wall=()
+          if [ -n "$WALL_TIME_COMMAND" ]; then
+            wall=(--criterion "$RUNNER_TEMP/head-target/criterion" --run "$RUN_URL")
+          fi
+          set +e
+          python3 "$GITHUB_WORKSPACE/$REPORT_SCRIPT" \
+            --home "$IAI_CALLGRIND_HOME" \
+            "${wall[@]}" \
+            --commit "$HEAD_SHA" \
+            --toolchain "$TOOLCHAIN" \
+            --limit "$BENCH_LIMIT_PERCENT" \
+            --pr "$PR" \
+            --base-home "$RUNNER_TEMP/base-iai" \
+            --ledger "$GITHUB_WORKSPACE/$LEDGER" \
+            --base-ledger "$RUNNER_TEMP/base/$LEDGER" \
+            --report "$GITHUB_WORKSPACE/$REPORT" \
+            --markdown "$RUNNER_TEMP/bench.md"
+          verdict=$?
+          cat "$RUNNER_TEMP/bench.md" >> "$GITHUB_STEP_SUMMARY"
+          if [ "$verdict" != 0 ]; then
+            echo "::error::The instruction-count gate failed; see the job summary."
+          fi
+          exit "$verdict"
+      - name: Name the report artifact
+        id: artifact
+        if: always()
+        run: echo "name=$(basename "$REPORT")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: always() && hashFiles(inputs.report-path) != ''
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ inputs.report-path }}
+
+  publish:
+    name: publish the bench report
+    if: github.event_name != 'pull_request' && inputs.publish
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    container: ${{ inputs.image }}
+    permissions:
+      contents: write
+    env:
+      BENCH_COMMAND: ${{ inputs.bench-command }}
+      REPORT_SCRIPT: ${{ inputs.report-script }}
+      REPORT: ${{ inputs.report-path }}
+      WALL_TIME_COMMAND: ${{ inputs.wall-time-command }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The publish checks the report is newer than the published one.
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Settings
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          echo "IAI_CALLGRIND_HOME=$GITHUB_WORKSPACE/target-iai" >> "$GITHUB_ENV"
+          echo "CARGO_TARGET_DIR=$GITHUB_WORKSPACE/target" >> "$GITHUB_ENV"
+      - name: Toolchain
+        id: toolchain
+        run: echo "version=$(rustc --version)" >> "$GITHUB_OUTPUT"
+      - name: Instruction counts
+        run: |
+          read -r -a bench_cmd <<< "$BENCH_COMMAND"
+          listed=$(python3 "$GITHUB_WORKSPACE/$REPORT_SCRIPT" --targets)
+          mapfile -t targets <<< "$listed"
+          for target in "${targets[@]}"; do
+            read -r package bench <<< "$target"
+            echo "::group::$package --bench $bench"
+            "${bench_cmd[@]}" -p "$package" --bench "$bench" -- --save-summary=json
+            echo "::endgroup::"
+          done
+      - name: Wall time
+        if: inputs.wall-time-command != ''
+        run: eval "$WALL_TIME_COMMAND"
+      - name: Report
+        env:
+          TOOLCHAIN: ${{ steps.toolchain.outputs.version }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          wall=()
+          if [ -n "$WALL_TIME_COMMAND" ]; then
+            wall=(--criterion "$CARGO_TARGET_DIR/criterion" --run "$RUN_URL")
+          fi
+          python3 "$GITHUB_WORKSPACE/$REPORT_SCRIPT" \
+            --home "$IAI_CALLGRIND_HOME" \
+            "${wall[@]}" \
+            --commit "$GITHUB_SHA" \
+            --toolchain "$TOOLCHAIN" \
+            --report "$GITHUB_WORKSPACE/$REPORT" \
+            --markdown "$RUNNER_TEMP/bench.md"
+          cat "$RUNNER_TEMP/bench.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Name the report artifact
+        id: artifact
+        run: echo "name=$(basename "$REPORT")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ inputs.report-path }}
+      # The checkout keeps no credentials; the publish pushes with the job's
+      # token, handed to git through the environment only (nothing is written
+      # to .git/config).
+      - name: Let git push to this repository
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          header=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$header"
+          {
+            echo "GIT_CONFIG_COUNT=1"
+            echo "GIT_CONFIG_KEY_0=http.${GITHUB_SERVER_URL}/.extraheader"
+            echo "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic $header"
+          } >> "$GITHUB_ENV"
+      - name: Publish to the reports branch
+        uses: ComlineProject/observatory/.github/actions/publish-report@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        with:
+          reports: ${{ inputs.report-path }}
+          readme: ${{ inputs.reports-readme }}
+          dry-run: ${{ github.ref != format('refs/heads/{0}', inputs.default-branch) }}

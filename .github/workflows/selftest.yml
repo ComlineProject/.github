@@ -1,0 +1,32 @@
+name: Selftest
+
+# Runs the reusable rust-ci.yml on a tiny fixture crate (selftest/), so the
+# whole matrix really runs. bench.yml and fuzz.yml need the CI image and a
+# repository's own bench and fuzz targets; they are checked by the lint
+# workflow only.
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: selftest-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  rust-ci:
+    name: rust-ci
+    uses: ./.github/workflows/rust-ci.yml
+    with:
+      working-directory: selftest
+      cross-platform: true
+      canary: true
+      features: extra
+      features-package: selftest-fixture
+      build-args: --locked
+      test-args: --locked
+      extra-setup: echo "extra setup ran on $RUNNER_OS"

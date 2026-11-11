@@ -1,0 +1,5 @@
+# GitHub's next Ubuntu image, used by rust-ci.yml's canary; actionlint doesn't
+# know the label yet.
+self-hosted-runner:
+  labels:
+    - ubuntu-26.04

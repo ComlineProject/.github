@@ -74,16 +74,15 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-defaults:
-  run:
-    shell: bash
-    working-directory: ${{ inputs.working-directory }}
-
 jobs:
   test:
     name: test (${{ matrix.toolchain }})
     runs-on: ubuntu-24.04
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
     strategy:
       matrix:
         toolchain: ${{ fromJSON(inputs.toolchains) }}
@@ -129,6 +128,10 @@ jobs:
     if: inputs.cross-platform
     runs-on: ${{ matrix.os }}
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
     strategy:
       fail-fast: false
       matrix:
@@ -176,6 +179,10 @@ jobs:
     if: inputs.canary
     runs-on: ubuntu-26.04
     timeout-minutes: 30
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
     continue-on-error: true
     env:
       RUSTUP_TOOLCHAIN: stable

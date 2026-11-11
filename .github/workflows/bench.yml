@@ -90,17 +90,16 @@ permissions:
 env:
   CARGO_TERM_COLOR: always
 
-defaults:
-  run:
-    shell: bash
-    working-directory: ${{ inputs.working-directory }}
-
 jobs:
   pull-request:
     name: instruction-count gate
     if: github.event_name == 'pull_request'
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
     container: ${{ inputs.image }}
     permissions:
       contents: read
@@ -241,6 +240,10 @@ jobs:
     if: github.event_name != 'pull_request' && inputs.publish
     runs-on: ubuntu-24.04
     timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
     container: ${{ inputs.image }}
     permissions:
       contents: write

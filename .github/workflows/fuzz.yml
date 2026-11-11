@@ -186,6 +186,7 @@ jobs:
         id: run
         run: |
           set -o pipefail
+          # shellcheck disable=SC2034 # read by the trap
           start=$(date +%s)
           trap 'echo "seconds=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"' EXIT
           # The nightly forks a process per core; fork mode stops at the first

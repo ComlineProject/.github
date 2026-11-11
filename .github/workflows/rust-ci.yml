@@ -1,0 +1,213 @@
+name: Rust CI
+
+# Reusable workflow: build and test a Cargo project.
+#
+# - `test (<toolchain>)`: the toolchain matrix on ubuntu-24.04;
+# - `test (<os>)`: stable on ubuntu-24.04-arm, macos-latest and windows-latest
+#   (`cross-platform`);
+# - `canary (ubuntu-26.04)`: stable on the next Ubuntu, which may fail without
+#   failing the run (`canary`).
+#
+# A repository's own special jobs (wasm targets, generated-file checks, the
+# FFI harness...) stay in its own workflow file, next to the call to this one.
+#
+# Concurrency belongs to the caller: set `concurrency:` on the caller's
+# workflow or job. This workflow sets none, so it can't cancel the caller's
+# other jobs.
+#
+# Needs no more than `contents: read`. See README.md for the inputs and a
+# caller.
+
+on:
+  workflow_call:
+    inputs:
+      toolchains:
+        description: JSON array of the toolchains for the matrix job.
+        type: string
+        default: '["stable","beta","nightly"]'
+      features:
+        description: >-
+          Cargo features for one more `cargo test` run on top of the default
+          one (comma or space separated); empty for none.
+        type: string
+        default: ''
+      features-package:
+        description: >-
+          The package `features` belongs to (`-p <package>`); empty for the
+          root package.
+        type: string
+        default: ''
+      build-args:
+        description: Extra arguments for every `cargo build`, e.g. `--locked`.
+        type: string
+        default: ''
+      test-args:
+        description: Extra arguments for every `cargo test`, e.g. `--locked`.
+        type: string
+        default: ''
+      targets:
+        description: Comma-separated extra rustup targets to install.
+        type: string
+        default: ''
+      cross-platform:
+        description: Also test stable on ubuntu-24.04-arm, macos-latest and windows-latest.
+        type: boolean
+        default: true
+      canary:
+        description: Also test stable on ubuntu-26.04, where a failure doesn't fail the run.
+        type: boolean
+        default: true
+      working-directory:
+        description: Where the Cargo workspace is, relative to the repository root.
+        type: string
+        default: .
+      extra-setup:
+        description: >-
+          A bash script run in every job before the build, e.g. to install a
+          system package.
+        type: string
+        default: ''
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+defaults:
+  run:
+    shell: bash
+    working-directory: ${{ inputs.working-directory }}
+
+jobs:
+  test:
+    name: test (${{ matrix.toolchain }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    strategy:
+      matrix:
+        toolchain: ${{ fromJSON(inputs.toolchains) }}
+    env:
+      # A rust-toolchain file in the caller overrides the toolchain the action
+      # makes the default; this variable overrides the file in turn.
+      RUSTUP_TOOLCHAIN: ${{ matrix.toolchain }}
+      BUILD_ARGS: ${{ inputs.build-args }}
+      TEST_ARGS: ${{ inputs.test-args }}
+      FEATURES: ${{ inputs.features }}
+      FEATURES_PACKAGE: ${{ inputs.features-package }}
+      EXTRA_SETUP: ${{ inputs.extra-setup }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: ${{ matrix.toolchain }}
+          targets: ${{ inputs.targets }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ${{ inputs.working-directory }}
+      - name: Extra setup
+        if: inputs.extra-setup != ''
+        run: eval "$EXTRA_SETUP"
+      - name: Build
+        run: |
+          # shellcheck disable=SC2086
+          cargo build --verbose $BUILD_ARGS
+      - name: Test
+        run: |
+          # shellcheck disable=SC2086
+          cargo test --verbose $TEST_ARGS
+      - name: Test with features
+        if: inputs.features != ''
+        run: |
+          # shellcheck disable=SC2086
+          cargo test --verbose ${FEATURES_PACKAGE:+-p "$FEATURES_PACKAGE"} --features "$FEATURES" $TEST_ARGS
+
+  cross-platform:
+    name: test (${{ matrix.os }})
+    if: inputs.cross-platform
+    runs-on: ${{ matrix.os }}
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        os:
+          - ubuntu-24.04-arm
+          - macos-latest
+          - windows-latest
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      BUILD_ARGS: ${{ inputs.build-args }}
+      TEST_ARGS: ${{ inputs.test-args }}
+      FEATURES: ${{ inputs.features }}
+      FEATURES_PACKAGE: ${{ inputs.features-package }}
+      EXTRA_SETUP: ${{ inputs.extra-setup }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          targets: ${{ inputs.targets }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ${{ inputs.working-directory }}
+      - name: Extra setup
+        if: inputs.extra-setup != ''
+        run: eval "$EXTRA_SETUP"
+      - name: Build
+        run: |
+          # shellcheck disable=SC2086
+          cargo build --verbose $BUILD_ARGS
+      - name: Test
+        run: |
+          # shellcheck disable=SC2086
+          cargo test --verbose $TEST_ARGS
+      - name: Test with features
+        if: inputs.features != ''
+        run: |
+          # shellcheck disable=SC2086
+          cargo test --verbose ${FEATURES_PACKAGE:+-p "$FEATURES_PACKAGE"} --features "$FEATURES" $TEST_ARGS
+
+  canary:
+    name: canary (ubuntu-26.04)
+    if: inputs.canary
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    continue-on-error: true
+    env:
+      RUSTUP_TOOLCHAIN: stable
+      BUILD_ARGS: ${{ inputs.build-args }}
+      TEST_ARGS: ${{ inputs.test-args }}
+      FEATURES: ${{ inputs.features }}
+      FEATURES_PACKAGE: ${{ inputs.features-package }}
+      EXTRA_SETUP: ${{ inputs.extra-setup }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # v1
+        with:
+          toolchain: stable
+          targets: ${{ inputs.targets }}
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          workspaces: ${{ inputs.working-directory }}
+      - name: Extra setup
+        if: inputs.extra-setup != ''
+        run: eval "$EXTRA_SETUP"
+      - name: Build
+        run: |
+          # shellcheck disable=SC2086
+          cargo build --verbose $BUILD_ARGS
+      - name: Test
+        run: |
+          # shellcheck disable=SC2086
+          cargo test --verbose $TEST_ARGS
+      - name: Test with features
+        if: inputs.features != ''
+        run: |
+          # shellcheck disable=SC2086
+          cargo test --verbose ${FEATURES_PACKAGE:+-p "$FEATURES_PACKAGE"} --features "$FEATURES" $TEST_ARGS

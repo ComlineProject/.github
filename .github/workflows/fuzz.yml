@@ -1,0 +1,379 @@
+name: Fuzz
+
+# Reusable workflow: cargo-fuzz, one job per target, in the CI image.
+#
+# - On a pull request each target runs for `pr-duration` seconds, seeded from
+#   the repository (`<fuzz-dir>/seed-corpus.sh`, if there is one).
+# - On any other run (the nightly schedule, a manual run) each target runs for
+#   `duration` seconds on every core of the runner (libFuzzer's fork mode),
+#   from a corpus cached between runs, and a failure opens an issue (one per
+#   target while one is open) instead of blocking anyone's pull request.
+# - Every run combines the per-target results into a report with the
+#   Observatory's `report-fuzz` action, as an artifact and in the job summary;
+#   with `publish`, a run on the default branch also commits it to the
+#   `reports` branch (other runs do a dry run of that).
+#
+# The image (`image`) has the nightly toolchain, cargo-fuzz, bash, git, gh and
+# python3 already: nothing is installed here.
+#
+# Permissions the caller must grant its job: `contents: read` and
+# `issues: write` (the fuzz jobs open the issue), and `contents: write` when
+# `publish` is on. Inside, `issues: write` is on the fuzz job alone and
+# `contents: write` on the publish job alone.
+#
+# Concurrency belongs to the caller: set `concurrency:` on the caller's
+# workflow or job (a `fuzz-publish` group with `cancel-in-progress: false` if
+# publishing runs can overlap). This workflow sets none.
+#
+# Extra fragments: a caller's own job (property tests, say) that uploads an
+# artifact named `fuzz-stats-*` holding a report-fuzz fragment gets it combined
+# into the report if it has finished by then: give the fuzz job
+# `needs: <that job>` in the caller.
+
+on:
+  workflow_call:
+    inputs:
+      image:
+        description: The CI container image, with its digest (ghcr.io/comlineproject/ci-rust:<tag>@sha256:...).
+        type: string
+        required: true
+      targets:
+        description: >-
+          JSON array of the fuzz targets: a string each, or an object
+          `{"target": "<name>", "dict": "<file in fuzz-dir>"}` (`dict` is
+          optional).
+        type: string
+        required: true
+      duration:
+        description: Seconds per target on a run that isn't a pull request.
+        type: number
+        default: 600
+      pr-duration:
+        description: Seconds per target on a pull request.
+        type: number
+        default: 60
+      fuzz-dir:
+        description: The cargo-fuzz directory, relative to the repository root.
+        type: string
+        required: true
+      working-directory:
+        description: Where cargo-fuzz is run from, relative to the repository root.
+        type: string
+        default: .
+      libfuzzer-args:
+        description: Extra libFuzzer arguments for every target, e.g. `-max_len=1024`.
+        type: string
+        default: ''
+      seed-script:
+        description: A `sh` script that seeds the corpus, relative to the repository root. Default `<fuzz-dir>/seed-corpus.sh`, when it exists.
+        type: string
+        default: ''
+      crash-format:
+        description: How a crash input is shown in the issue, `text` or `hex`.
+        type: string
+        default: text
+      report-path:
+        description: Where the combined report is written, relative to the repository root (e.g. reports/core.fuzz.json).
+        type: string
+        required: true
+      report-subject:
+        description: The report's `runtime` field (report-fuzz's `subject`); optional.
+        type: string
+        default: ''
+      publish:
+        description: Publish the report to the `reports` branch on a run of the default branch (not a pull request).
+        type: boolean
+        default: false
+      default-branch:
+        description: The branch the report is published from.
+        type: string
+        default: main
+      reports-readme:
+        description: The file published as the reports branch's README.md.
+        type: string
+        default: .github/reports-branch.md
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  plan:
+    name: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    outputs:
+      matrix: ${{ steps.plan.outputs.matrix }}
+      expect: ${{ steps.plan.outputs.expect }}
+      timeout: ${{ steps.plan.outputs.timeout }}
+    steps:
+      - id: plan
+        env:
+          TARGETS: ${{ inputs.targets }}
+          DURATION: ${{ inputs.duration }}
+          PR_DURATION: ${{ inputs.pr-duration }}
+        run: |
+          matrix=$(jq -c 'map(if type == "string" then {target: ., dict: ""} else {dict: ""} + . end)' <<< "$TARGETS")
+          echo "matrix=$matrix" >> "$GITHUB_OUTPUT"
+          echo "expect=$(jq -r 'map(.target) | join(" ")' <<< "$matrix")" >> "$GITHUB_OUTPUT"
+          # 30 minutes to build and wrap up, plus the longest fuzzing run.
+          longest=$(( DURATION > PR_DURATION ? DURATION : PR_DURATION ))
+          echo "timeout=$(( 30 + (longest + 59) / 60 ))" >> "$GITHUB_OUTPUT"
+
+  fuzz:
+    name: fuzz (${{ matrix.target }})
+    needs: plan
+    runs-on: ubuntu-24.04
+    timeout-minutes: ${{ fromJSON(needs.plan.outputs.timeout) }}
+    container: ${{ inputs.image }}
+    permissions:
+      contents: read
+      issues: write
+    strategy:
+      fail-fast: false
+      matrix:
+        include: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    defaults:
+      run:
+        shell: bash
+        working-directory: ${{ inputs.working-directory }}
+    env:
+      # cargo-fuzz needs nightly; this overrides any rust-toolchain file.
+      RUSTUP_TOOLCHAIN: nightly
+      NIGHTLY: ${{ github.event_name != 'pull_request' }}
+      SECONDS_PER_TARGET: ${{ github.event_name == 'pull_request' && inputs.pr-duration || inputs.duration }}
+      FUZZ_DIR: ${{ inputs.fuzz-dir }}
+      SEED_SCRIPT: ${{ inputs.seed-script }}
+      LIBFUZZER_ARGS: ${{ inputs.libfuzzer-args }}
+      CRASH_FORMAT: ${{ inputs.crash-format }}
+      TARGET: ${{ matrix.target }}
+      DICT: ${{ matrix.dict }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Settings
+        run: |
+          git config --global --add safe.directory "$GITHUB_WORKSPACE"
+          mkdir -p "$GITHUB_WORKSPACE/fuzz-out"
+
+      - name: Cache the corpus
+        if: env.NIGHTLY == 'true'
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: ${{ inputs.fuzz-dir }}/corpus/${{ matrix.target }}
+          key: fuzz-corpus-${{ matrix.target }}-${{ github.run_id }}
+          restore-keys: fuzz-corpus-${{ matrix.target }}-
+
+      - name: Seed the corpus
+        run: |
+          seed="${SEED_SCRIPT:-$FUZZ_DIR/seed-corpus.sh}"
+          if [ -f "$GITHUB_WORKSPACE/$seed" ]; then
+            sh "$GITHUB_WORKSPACE/$seed"
+          else
+            echo "No seed script ($seed); starting from the corpus as it is."
+          fi
+
+      - name: Build
+        id: build
+        run: |
+          cargo fuzz build --fuzz-dir "$GITHUB_WORKSPACE/$FUZZ_DIR" "$TARGET"
+          echo "toolchain=$(rustc --version)" >> "$GITHUB_OUTPUT"
+
+      - name: Fuzz for ${{ env.SECONDS_PER_TARGET }}s
+        id: run
+        run: |
+          set -o pipefail
+          start=$(date +%s)
+          trap 'echo "seconds=$(( $(date +%s) - start ))" >> "$GITHUB_OUTPUT"' EXIT
+          # The nightly forks a process per core; fork mode stops at the first
+          # crash, as a single process does.
+          fork=()
+          [ "$NIGHTLY" = true ] && fork=("-fork=$(nproc)")
+          dict=()
+          [ -n "$DICT" ] && dict=("-dict=$GITHUB_WORKSPACE/$FUZZ_DIR/$DICT")
+          extra=()
+          read -r -a extra <<< "$LIBFUZZER_ARGS"
+          cargo fuzz run --fuzz-dir "$GITHUB_WORKSPACE/$FUZZ_DIR" "$TARGET" -- \
+            -max_total_time="$SECONDS_PER_TARGET" "${fork[@]}" \
+            "${dict[@]}" "${extra[@]}" \
+            -rss_limit_mb=2048 -malloc_limit_mb=512 -print_final_stats=1 \
+            2>&1 | tee "$GITHUB_WORKSPACE/fuzz-out/fuzz.log"
+
+      # Before minimizing, which adds its own files next to the finding.
+      - name: Record the run
+        if: always() && steps.build.outcome == 'success'
+        uses: ComlineProject/observatory/.github/actions/report-fuzz@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        with:
+          mode: target
+          name: ${{ matrix.target }}
+          toolchain: ${{ steps.build.outputs.toolchain }}
+          log: fuzz-out/fuzz.log
+          corpus: ${{ inputs.fuzz-dir }}/corpus/${{ matrix.target }}
+          artifacts: ${{ inputs.fuzz-dir }}/artifacts/${{ matrix.target }}
+          wall-seconds: ${{ steps.run.outputs.seconds || 0 }}
+          fragment: fuzz-out/stats/${{ matrix.target }}.json
+      - if: always() && steps.build.outcome == 'success'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-stats-${{ matrix.target }}
+          path: fuzz-out/stats
+
+      - name: Minimize the crash
+        if: failure()
+        run: |
+          for crash in "$GITHUB_WORKSPACE/$FUZZ_DIR/artifacts/$TARGET"/*; do
+            [ -f "$crash" ] || continue
+            cargo fuzz tmin --fuzz-dir "$GITHUB_WORKSPACE/$FUZZ_DIR" "$TARGET" "$crash" -r 2000 || true
+          done
+      - name: Upload the crash
+        if: failure()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: fuzz-${{ matrix.target }}
+          path: ${{ inputs.fuzz-dir }}/artifacts/${{ matrix.target }}
+          if-no-files-found: ignore
+
+      - name: Open an issue
+        if: failure() && env.NIGHTLY == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TITLE: "Nightly fuzzing failed: ${{ matrix.target }}"
+          RUN: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          open=$(gh issue list --repo "$GITHUB_REPOSITORY" --state open --limit 200 \
+            --json title --jq "map(select(.title == env.TITLE)) | length")
+          if [ "$open" != "0" ]; then
+            echo "An issue titled '$TITLE' is already open."
+            exit 0
+          fi
+          {
+            echo "The nightly fuzz run failed: $RUN"
+            echo
+            if [ "$CRASH_FORMAT" = hex ]; then
+              echo "The crash and its minimized form are the run's \`fuzz-$TARGET\` artifact. As hex:"
+            else
+              echo "The crash and its minimized form are the run's \`fuzz-$TARGET\` artifact. As text:"
+            fi
+            echo
+            for crash in "$GITHUB_WORKSPACE/$FUZZ_DIR/artifacts/$TARGET"/*; do
+              [ -f "$crash" ] || continue
+              if [ "$CRASH_FORMAT" = hex ]; then
+                echo "- \`$(basename "$crash")\`: \`$(od -An -v -tx1 "$crash" | tr -d ' \n' | cut -c1-2000)\`"
+              else
+                echo "- \`$(basename "$crash")\`:"
+                echo
+                echo '  ```'
+                head -c 2000 "$crash" | sed 's/^/  /'
+                echo
+                echo '  ```'
+              fi
+            done
+            echo
+            echo "Reproduce with \`cargo +nightly fuzz run --fuzz-dir $FUZZ_DIR $TARGET <file>\`."
+          } > "$RUNNER_TEMP/body.md"
+          gh issue create --repo "$GITHUB_REPOSITORY" --title "$TITLE" --body-file "$RUNNER_TEMP/body.md"
+
+  report:
+    name: fuzz report
+    needs: [plan, fuzz]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: read
+    env:
+      REPORT: ${{ inputs.report-path }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # The dry run checks the report is newer than the published one.
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: fuzz-stats-*
+          path: ${{ runner.temp }}/stats
+      - name: Report
+        uses: ComlineProject/observatory/.github/actions/report-fuzz@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        with:
+          mode: combine
+          subject: ${{ inputs.report-subject }}
+          fragments: ${{ runner.temp }}/stats
+          expect: ${{ needs.plan.outputs.expect }}
+          output: ${{ inputs.report-path }}
+          markdown: ${{ runner.temp }}/fuzz.md
+      - run: cat "$RUNNER_TEMP/fuzz.md" >> "$GITHUB_STEP_SUMMARY"
+      - name: Name the report artifact
+        id: artifact
+        run: echo "name=$(basename "$REPORT")" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ inputs.report-path }}
+      # The checkout keeps no credentials; the dry run fetches the reports
+      # branch with the job's read-only token, handed to git through the
+      # environment only.
+      - name: Let git fetch from this repository
+        if: inputs.publish
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          header=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$header"
+          {
+            echo "GIT_CONFIG_COUNT=1"
+            echo "GIT_CONFIG_KEY_0=http.${GITHUB_SERVER_URL}/.extraheader"
+            echo "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic $header"
+          } >> "$GITHUB_ENV"
+      - name: Publish (dry run)
+        if: inputs.publish && (github.ref != format('refs/heads/{0}', inputs.default-branch) || github.event_name == 'pull_request')
+        uses: ComlineProject/observatory/.github/actions/publish-report@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        with:
+          reports: ${{ inputs.report-path }}
+          readme: ${{ inputs.reports-readme }}
+          dry-run: 'true'
+
+  publish:
+    name: publish fuzz report
+    needs: report
+    if: ${{ !cancelled() && needs.report.result == 'success' && inputs.publish && github.ref == format('refs/heads/{0}', inputs.default-branch) && github.event_name != 'pull_request' }}
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      contents: write
+    env:
+      REPORT: ${{ inputs.report-path }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Name the report artifact
+        id: artifact
+        run: echo "name=$(basename "$REPORT")" >> "$GITHUB_OUTPUT"
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: ${{ steps.artifact.outputs.name }}
+          path: ${{ runner.temp }}/report
+      # The checkout keeps no credentials; the publish pushes with the job's
+      # token, handed to git through the environment only (nothing is written
+      # to .git/config).
+      - name: Let git push to this repository
+        env:
+          TOKEN: ${{ github.token }}
+        run: |
+          header=$(printf 'x-access-token:%s' "$TOKEN" | base64 | tr -d '\n')
+          echo "::add-mask::$header"
+          {
+            echo "GIT_CONFIG_COUNT=1"
+            echo "GIT_CONFIG_KEY_0=http.${GITHUB_SERVER_URL}/.extraheader"
+            echo "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic $header"
+          } >> "$GITHUB_ENV"
+      - name: Publish to the reports branch
+        uses: ComlineProject/observatory/.github/actions/publish-report@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        with:
+          reports: ${{ runner.temp }}/report/${{ steps.artifact.outputs.name }}
+          readme: ${{ inputs.reports-readme }}

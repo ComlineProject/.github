@@ -1,0 +1,11 @@
+[package]
+name = "selftest-fixture"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+[features]
+# Exercises rust-ci.yml's `features` input.
+extra = []
+
+[dependencies]

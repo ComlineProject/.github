@@ -51,12 +51,14 @@ these workflows.
 ### rust-ci.yml
 
 Builds and tests a Cargo project: a toolchain matrix on `ubuntu-24.04`, stable
-on `ubuntu-24.04-arm`, `macos-latest` and `windows-latest`, and stable on
+on `ubuntu-24.04-arm`, `macos-15` and `windows-2025`, and stable on
 `ubuntu-26.04` as a canary that may fail without failing the run. Toolchains
 are installed with `dtolnay/rust-toolchain` and exported as `RUSTUP_TOOLCHAIN`,
 so they win over a `rust-toolchain.toml`. Jobs that are special to one
 repository (other targets, generated-file checks, harnesses) stay in its own
-workflow, next to the call.
+workflow, next to the call. Every job's first step is `step-security/harden-runner`
+in audit mode (it supports Linux, macOS and Windows hosted runners; audit only
+on the last two).
 
 | Input | Type | Default | Meaning |
 | --- | --- | --- | --- |
@@ -119,6 +121,7 @@ never on a pull request.
 | `report-path` | string | required | Where the script writes the report, from the repository root. Its file name is the artifact's name. |
 | `bench-command` | string | `cargo bench` | Run as `<bench-command> -p <package> --bench <bench> -- <iai args>`. |
 | `working-directory` | string | `.` | Where the Cargo workspace is. |
+| `container-options` | string | `--security-opt seccomp=unconfined` | Docker options of the job's container. iai-callgrind's runner calls `setarch -R`, which Docker's default seccomp profile refuses. |
 | `report-script` | string | `.github/scripts/bench-report.py` | The report script, from the repository root. |
 | `limit-percent` | string | `1` | The most a count may grow, in percent. |
 | `wall-time-command` | string | empty | A Criterion run on the head, not gated. |
@@ -215,3 +218,20 @@ jobs:
 `renovate-config.json`. `selftest.yml` calls `rust-ci.yml` on the fixture crate
 in `selftest/`. `bench.yml` and `fuzz.yml` need the CI image and a repository's
 own targets, so only actionlint checks them here.
+
+### lint.yml
+
+`lint.yml` is also reusable: a repository calls it to run actionlint on its own
+workflows, and optionally to validate a Renovate config.
+
+| Input | Type | Default | Meaning |
+| --- | --- | --- | --- |
+| `renovate-config` | string | empty | A Renovate config to validate with `--strict`, from the repository root; empty skips the check. |
+
+```yaml
+jobs:
+  lint:
+    uses: ComlineProject/.github/.github/workflows/lint.yml@<sha>
+    with:
+      renovate-config: renovate.json
+```

@@ -15,7 +15,8 @@ name: Bench
 #
 # The job runs in the CI image (`image`), which has the toolchain, valgrind and
 # iai-callgrind-runner, bash, git and python3 already: nothing is installed
-# here.
+# here. Steps in a container default to `sh -e`, so each container job sets
+# `defaults: run: shell: bash` (the scripts use bash arrays and `mapfile`).
 #
 # Fork-safe by construction: the caller must run it from a plain
 # `pull_request` trigger (never `pull_request_target`), where a fork's run gets
@@ -47,6 +48,13 @@ on:
         description: Where the Cargo workspace is, relative to the repository root.
         type: string
         default: .
+      container-options:
+        description: >-
+          Docker options for the job's container. The default lifts Docker's
+          seccomp profile, which refuses the `setarch -R` that
+          iai-callgrind's runner calls.
+        type: string
+        default: --security-opt seccomp=unconfined
       report-script:
         description: The repository's report script, relative to the repository root.
         type: string
@@ -100,7 +108,9 @@ jobs:
       run:
         shell: bash
         working-directory: ${{ inputs.working-directory }}
-    container: ${{ inputs.image }}
+    container:
+      image: ${{ inputs.image }}
+      options: ${{ inputs.container-options }}
     permissions:
       contents: read
     env:
@@ -244,7 +254,9 @@ jobs:
       run:
         shell: bash
         working-directory: ${{ inputs.working-directory }}
-    container: ${{ inputs.image }}
+    container:
+      image: ${{ inputs.image }}
+      options: ${{ inputs.container-options }}
     permissions:
       contents: write
     env:

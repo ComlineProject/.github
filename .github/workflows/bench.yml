@@ -331,7 +331,7 @@ jobs:
             echo "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic $header"
           } >> "$GITHUB_ENV"
       - name: Publish to the reports branch
-        uses: ComlineProject/observatory/.github/actions/publish-report@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        uses: ComlineProject/observatory/.github/actions/publish-report@6544a11bdfb9e4def0a64d6cff1cf8c3df464951 # v1
         with:
           reports: ${{ inputs.report-path }}
           readme: ${{ inputs.reports-readme }}

@@ -207,7 +207,7 @@ jobs:
       # Before minimizing, which adds its own files next to the finding.
       - name: Record the run
         if: always() && steps.build.outcome == 'success'
-        uses: ComlineProject/observatory/.github/actions/report-fuzz@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        uses: ComlineProject/observatory/.github/actions/report-fuzz@6544a11bdfb9e4def0a64d6cff1cf8c3df464951 # v1
         with:
           mode: target
           name: ${{ matrix.target }}
@@ -299,7 +299,7 @@ jobs:
           pattern: fuzz-stats-*
           path: ${{ runner.temp }}/stats
       - name: Report
-        uses: ComlineProject/observatory/.github/actions/report-fuzz@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        uses: ComlineProject/observatory/.github/actions/report-fuzz@6544a11bdfb9e4def0a64d6cff1cf8c3df464951 # v1
         with:
           mode: combine
           subject: ${{ inputs.report-subject }}
@@ -332,7 +332,7 @@ jobs:
           } >> "$GITHUB_ENV"
       - name: Publish (dry run)
         if: inputs.publish && (github.ref != format('refs/heads/{0}', inputs.default-branch) || github.event_name == 'pull_request')
-        uses: ComlineProject/observatory/.github/actions/publish-report@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        uses: ComlineProject/observatory/.github/actions/publish-report@6544a11bdfb9e4def0a64d6cff1cf8c3df464951 # v1
         with:
           reports: ${{ inputs.report-path }}
           readme: ${{ inputs.reports-readme }}
@@ -375,7 +375,7 @@ jobs:
             echo "GIT_CONFIG_VALUE_0=AUTHORIZATION: basic $header"
           } >> "$GITHUB_ENV"
       - name: Publish to the reports branch
-        uses: ComlineProject/observatory/.github/actions/publish-report@8d21b1fbe68f8b639676153ce1a308eaafdcc6a7 # v1
+        uses: ComlineProject/observatory/.github/actions/publish-report@6544a11bdfb9e4def0a64d6cff1cf8c3df464951 # v1
         with:
           reports: ${{ runner.temp }}/report/${{ steps.artifact.outputs.name }}
           readme: ${{ inputs.reports-readme }}
